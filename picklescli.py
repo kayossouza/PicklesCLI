@@ -464,7 +464,7 @@ def ask():
                         code_update = temp_code_file.read()
 
                 show_stage("Inserting Code")
-                append_to_own_code(code_update, feature_name)
+                # append_to_own_code(code_update, feature_name)
                 create_documentation(feature_name, query)
 
                 last_branch = get_last_branch()
