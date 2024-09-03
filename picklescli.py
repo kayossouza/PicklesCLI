@@ -1,87 +1,90 @@
+import os
 import click
 import openai
-import os
-from colorama import Fore, Style, init
 import json
 import itertools
 import sys
 import time
 import threading
 import re
-from github import Github, GithubException
-import subprocess
-import shutil
 import ast
+import subprocess
+from github import Github
+from colorama import Fore, Style, init
 from plyer import notification
-import datetime
 import random
+import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# Initialize colorama
+# Initialize colorama and logging
 init(autoreset=True)
+LOG_FILE = "mr_pickles.log"
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO)
 
-# Ensure the OpenAI API key is set as an environment variable
+# Set API keys and repository details
 openai.api_key = os.getenv('OPENAI_API_KEY')
-if not openai.api_key:
-    click.echo(f"{Fore.RED}OpenAI API key not found. Please set the 'OPENAI_API_KEY' environment variable.{Style.RESET_ALL}")
-    sys.exit(1)
-
-# Ensure the GitHub token is set as an environment variable
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-if not GITHUB_TOKEN:
-    click.echo(f"{Fore.RED}GitHub token not found. Please set the 'GITHUB_TOKEN' environment variable.{Style.RESET_ALL}")
-    sys.exit(1)
-
-REPO_NAME = "kayossouza/PicklesCLI"  # Replace with your repo name
+REPO_NAME = "kayossouza/PicklesCLI"
 
 # Initialize GitHub client
-try:
-    github_client = Github(GITHUB_TOKEN)
-    repo = github_client.get_repo(REPO_NAME)
-except GithubException as e:
-    click.echo(f"{Fore.RED}Failed to access GitHub repository: {e}{Style.RESET_ALL}")
-    sys.exit(1)
+github_client = Github(GITHUB_TOKEN)
+repo = github_client.get_repo(REPO_NAME)
 
+# File and directory constants
 CONVERSATION_FILE = 'conversation_history.json'
 FEATURE_REQUEST_FILE = 'feature_requests.json'
+FEATURE_DIR = "features"
+DOCS_DIR = "docs"
+PROJECTS_DIR = "projects"
 
-# Simple adaptive learning state
+# Create directories if they don't exist
+os.makedirs(FEATURE_DIR, exist_ok=True)
+os.makedirs(DOCS_DIR, exist_ok=True)
+os.makedirs(PROJECTS_DIR, exist_ok=True)
+
+# Adaptive learning state for Mr. Pickles
 adaptive_learning_state = {
-    "detail_level": "detailed",  # can be "normal" or "detailed"
-    "tone": "sarcastic"  # can be "neutral" or "sarcastic"
+    "detail_level": "detailed",
+    "tone": "sarcastic"
 }
 
+# HTTP session setup with retry logic
+def create_http_session():
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    return session
+
+# Load conversation history from file
 def load_conversation_history():
-    """Loads the conversation history from a file."""
     if os.path.exists(CONVERSATION_FILE):
         with open(CONVERSATION_FILE, 'r') as f:
             return json.load(f)
     return []
 
+# Save conversation history to file
 def save_conversation_history(history):
-    """Saves the conversation history to a file."""
     with open(CONVERSATION_FILE, 'w') as f:
         json.dump(history, f, indent=4)
 
+# Analyze conversation history for context and recall
 def analyze_conversation_history(history, query):
-    """Analyzes conversation history to detect patterns or recurring topics."""
     related_past_responses = []
-    query_keywords = set(query.lower().split())
     for entry in history:
-        if entry["role"] == "user":
-            entry_keywords = set(entry["content"].lower().split())
-            if query_keywords.intersection(entry_keywords):
-                related_past_responses.append(entry["content"])
+        if entry["role"] == "user" and any(keyword in entry["content"].lower() for keyword in query.lower().split()):
+            related_past_responses.append(entry["content"])
     return related_past_responses
 
+# Sanitize branch name for Git
 def sanitize_branch_name(name):
-    """Sanitizes the branch name to be valid in Git."""
     sanitized_name = re.sub(r'[^a-zA-Z0-9\-]', '-', name)
     sanitized_name = re.sub(r'-+', '-', sanitized_name)
     sanitized_name = sanitized_name.strip('-')
-    return sanitized_name[:20]  # Ensure branch name is not too long
+    return sanitized_name[:20]
 
+# Display Mr. Pickles' ASCII art
 def display_ascii_mr_pickles():
-    """Displays the ASCII art of Mr. Pickles."""
     art = r"""
             ______              
        .d$$$******$$$$c.        
@@ -103,8 +106,8 @@ $$e$P"    $b     d$`    "$$c$F
 """
     print(Fore.MAGENTA + Style.BRIGHT + art + Style.RESET_ALL)
 
+# Spinner animation for processing
 def spinning_pentagram(stop_event):
-    """Creates a spinning pentagram animation while waiting for a response."""
     spinner = itertools.cycle(['◢', '◣', '◤', '◥'])
     while not stop_event.is_set():
         sys.stdout.write(Fore.MAGENTA + next(spinner) + Style.RESET_ALL)
@@ -112,247 +115,136 @@ def spinning_pentagram(stop_event):
         time.sleep(0.1)
         sys.stdout.write('\b')
 
+# Display the current stage of the process
 def show_stage(stage_name):
-    """Displays the current stage of the process."""
     click.echo(f"{Fore.CYAN}{Style.BRIGHT}[{stage_name}] {Style.RESET_ALL}")
 
-def read_own_code():
-    """Reads the current script's code."""
-    with open(__file__, 'r') as f:
-        return f.read()
-
-def find_insertion_points(file_content):
-    """
-    Parses the current script and identifies insertion points for imports, functions, classes, etc.
-    Returns a dictionary with keys like 'imports', 'functions', 'classes', and their respective line numbers.
-    """
-    insertion_points = {
-        'imports': [],
-        'functions': [],
-        'classes': [],
-        'others': []
-    }
+# Insert imports and other code into the correct place in the file
+def insert_imports_and_code(imports, other_code, file_path):
     try:
-        tree = ast.parse(file_content)
-        for node in ast.iter_child_nodes(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                insertion_points['imports'].append(node.lineno)
-            elif isinstance(node, ast.FunctionDef):
-                insertion_points['functions'].append(node.lineno)
-            elif isinstance(node, ast.ClassDef):
-                insertion_points['classes'].append(node.lineno)
-            else:
-                insertion_points['others'].append(node.lineno)
-    except SyntaxError as e:
-        click.echo(f"{Fore.RED}Syntax error while parsing the script: {e}{Style.RESET_ALL}")
-    return insertion_points
+        with open(file_path, 'r') as f:
+            file_content = f.readlines()
 
-def append_to_own_code(code_snippet, insertion_marker=None):
-    """
-    Appends the generated code snippet to the script file, removing non-executable lines,
-    checking indentation, placing imports at the top, and inserting other code based on context
-    or a specific marker.
-    """
-    try:
-        # Parse the code snippet and filter out non-code lines
-        parsed_code_snippet = code_snippet.split("\n")
-        imports = []
-        other_code = []
+        import_insertion_index = 0
+        for i, line in enumerate(file_content):
+            if line.strip().startswith("import ") or line.strip().startswith("from "):
+                import_insertion_index = i + 1
 
-        for line in parsed_code_snippet:
-            stripped_line = line.strip()
+        if imports:
+            file_content.insert(import_insertion_index, imports + "\n")
 
-            # Skip markdown code block markers, comments, and empty lines
-            if stripped_line.startswith("```") or not stripped_line or stripped_line.startswith("#"):
+        insertion_index = None
+        for i in reversed(range(len(file_content))):
+            if file_content[i].strip().startswith("@"):
                 continue
-            elif stripped_line.startswith("import ") or stripped_line.startswith("from "):
-                imports.append(line)
-            else:
-                other_code.append(line)
+            if file_content[i].strip().startswith(("def ", "class ")):
+                insertion_index = i + 1
+                break
 
-        # Join the cleaned Python code into single strings
-        cleaned_imports = "\n".join(imports)
-        cleaned_other_code = "\n".join(other_code)
+        if insertion_index is None:
+            insertion_index = len(file_content)
 
-        # Check the executability of the cleaned code
-        try:
-            # Compile the code to check for syntax errors
-            ast.parse(cleaned_other_code)
-        except SyntaxError as e:
-            click.echo(f"{Fore.RED}The generated code contains syntax errors: {e}{Style.RESET_ALL}")
-            return
+        if other_code:
+            file_content.insert(insertion_index, other_code + "\n")
 
-        # Read the current content of the file
-        with open(__file__, 'r') as f:
-            file_content = f.read()
-            file_lines = file_content.splitlines()
+        with open(file_path, 'w') as f:
+            f.writelines(file_content)
 
-        # Find insertion points
-        insertion_points = find_insertion_points(file_content)
-
-        # Insert new imports after the last existing import
-        if cleaned_imports:
-            if insertion_points['imports']:
-                last_import_line = max(insertion_points['imports'])
-                file_lines.insert(last_import_line, cleaned_imports)
-            else:
-                # If no imports exist, insert at the top
-                file_lines.insert(0, cleaned_imports)
-            click.echo(f"{Fore.GREEN}Imports inserted successfully.{Style.RESET_ALL}")
-
-        # Determine where to insert other code
-        if insertion_marker:
-            # Try to find the insertion marker in the file
-            insertion_index = None
-            for i, line in enumerate(file_lines):
-                if insertion_marker in line:
-                    insertion_index = i + 1  # Insert after the marker
-                    break
-        else:
-            # If no marker, insert after the last function or class definition
-            insertion_index = None
-            if insertion_points['functions'] or insertion_points['classes']:
-                last_def_line = max(insertion_points['functions'] + insertion_points['classes'])
-                insertion_index = last_def_line
-            else:
-                # If no functions or classes, append at the end
-                insertion_index = len(file_lines)
-
-        # Adjust indentation if necessary
-        if insertion_index is not None and insertion_index < len(file_lines):
-            current_line = file_lines[insertion_index]
-            current_indentation = len(current_line) - len(current_line.lstrip())
-            cleaned_other_code = "\n".join([
-                (" " * current_indentation) + line if line else line
-                for line in cleaned_other_code.split("\n")
-            ])
-
-        # Insert the other code at the determined position
-        if cleaned_other_code:
-            if insertion_index is not None:
-                file_lines.insert(insertion_index, cleaned_other_code)
-            else:
-                file_lines.append(cleaned_other_code)
-            click.echo(f"{Fore.GREEN}Code inserted successfully.{Style.RESET_ALL}")
-
-        # Write the updated content back to the file
-        updated_content = "\n".join(file_lines)
-        with open(__file__, 'w') as f:
-            f.write(updated_content)
-
-        click.echo(f"{Fore.GREEN}Script updated successfully.{Style.RESET_ALL}")
+        click.echo(f"{Fore.GREEN}Code successfully inserted into {file_path}.{Style.RESET_ALL}")
 
     except Exception as e:
         click.echo(f"{Fore.RED}An error occurred while updating the script: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error inserting code: {str(e)}")
 
-def generate_code_for_feature_request(feature_request, file_content):
-    """Generates code based on the feature request using OpenAI, providing the file content as context."""
+# Append generated code to the script, ensuring only executable Python code is inserted
+def append_to_own_code(code_snippet, feature_name):
+    try:
+        parsed_code_snippet = []
+        inside_code_block = False
+
+        for line in code_snippet.split("\n"):
+            stripped_line = line.strip()
+
+            if stripped_line.startswith("```python"):
+                inside_code_block = True
+                continue
+            elif stripped_line.startswith("```"):
+                inside_code_block = False
+                continue
+
+            if inside_code_block:
+                parsed_code_snippet.append(line)
+            elif not inside_code_block and stripped_line.startswith(("class ", "def ", "import ", "from ")):
+                parsed_code_snippet.append(line)
+
+        cleaned_code = "\n".join(parsed_code_snippet)
+
+        try:
+            ast.parse(cleaned_code)
+        except SyntaxError as e:
+            click.echo(f"{Fore.RED}The generated code contains syntax errors: {e}{Style.RESET_ALL}")
+            logging.error(f"Syntax error in generated code: {str(e)}")
+            return
+
+        feature_file_path = os.path.join(FEATURE_DIR, f"{feature_name}.py")
+        with open(feature_file_path, 'w') as f:
+            f.write(cleaned_code)
+
+        insert_imports_and_code("", f"from features import {feature_name}\n", __file__)
+
+    except Exception as e:
+        click.echo(f"{Fore.RED}An error occurred while updating the script: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error updating script: {str(e)}")
+
+# Generate code for a feature request using OpenAI
+def generate_code_for_feature_request(feature_request):
     show_stage("Generating Code")
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are Mr. Pickles, a highly skilled and sarcastic AI software engineer assistant. "
-                "Your goal is to generate high-quality, efficient, and clean Python code for specific feature requests. "
-                "You should provide code that is ready to be inserted directly into a Python script, without additional modifications needed."
-            )
-        },
-        {
-            "role": "user",
-            "content": (
-                f"The user is requesting the following feature: {feature_request}. "
-                "Please generate the necessary Python code, ensuring that it follows best practices and is optimized for readability and performance."
-            )
-        },
-        {
-            "role": "user",
-            "content": (
-                "Here is the current content of the script where the new code should be inserted:\n\n"
-                f"{file_content}"
-            )
-        },
-        {
-            "role": "user",
-            "content": (
-                "Provide the code without any additional explanation or comments."
-            )
-        }
+        {"role": "system", "content": "You are Mr. Pickles, a highly skilled and sarcastic AI software engineer assistant. Your goal is to generate high-quality, efficient, and clean Python code for specific feature requests. You should provide code that is ready to be inserted directly into a Python script, without additional modifications needed."},
+        {"role": "user", "content": f"The user is requesting the following feature: {feature_request}. Please generate the necessary Python code, ensuring that it follows best practices and is optimized for readability and performance."}
     ]
 
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=messages,
-            temperature=0.2,  # Low temperature for more deterministic output
-            max_tokens=1000,   # Adjust as needed
-            n=1,
-            stop=None
-        )
-        generated_code = response.choices[0].message['content'].strip()
-        return generated_code
-    except openai.Error as e:
-        click.echo(f"{Fore.RED}OpenAI API error: {e}{Style.RESET_ALL}")
-        return ""
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=messages
+    )
+    return response.choices[0].message['content']
 
-def test_new_feature(feature_name):
-    """Tests the newly implemented feature."""
-    try:
-        # Dynamically import the current script as a module to access the new feature
-        spec = ast.parse(read_own_code())
-        exec(read_own_code(), globals())
-        if callable(globals().get(feature_name)):
-            globals()[feature_name]()
-            click.echo(f"{Fore.GREEN}Feature '{feature_name}' tested successfully!{Style.RESET_ALL}")
-        else:
-            click.echo(f"{Fore.YELLOW}Feature '{feature_name}' is not callable or does not exist.{Style.RESET_ALL}")
-    except Exception as e:
-        click.echo(f"{Fore.RED}An error occurred while testing the feature: {str(e)}{Style.RESET_ALL}")
-
+# Create a new branch for the feature
 def create_branch(branch_name, base_branch="master"):
-    """Creates a new branch from the base branch."""
     show_stage("Creating Branch")
     try:
         base = repo.get_branch(base_branch)
         repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base.commit.sha)
         click.echo(f"{Fore.GREEN}Branch '{branch_name}' created from '{base_branch}'.{Style.RESET_ALL}")
-    except GithubException as e:
-        if 'Reference already exists' in str(e):
-            click.echo(f"{Fore.YELLOW}Branch '{branch_name}' already exists.{Style.RESET_ALL}")
-        else:
-            click.echo(f"{Fore.RED}Error creating branch: {e}{Style.RESET_ALL}")
-            raise
-
-def commit_and_push_changes(branch_name, file_path, commit_message):
-    """Commits changes and pushes to the branch."""
-    show_stage("Committing and Pushing Changes")
-    try:
-        # Fetch the latest branches from the remote to ensure the new branch is recognized locally
-        subprocess.run(["git", "fetch"], check=True)
-
-        # Checkout the branch
-        subprocess.run(["git", "checkout", branch_name], check=True)
-
-        # Add the file and commit changes
-        subprocess.run(["git", "add", file_path], check=True)
-        subprocess.run(["git", "commit", "-m", commit_message], check=True)
-
-        # Push changes to the remote repository
-        subprocess.run(["git", "push", "--set-upstream", "origin", branch_name], check=True)
-        
-        click.echo(f"{Fore.GREEN}Changes committed and pushed to branch '{branch_name}'.{Style.RESET_ALL}")
-    except subprocess.CalledProcessError as e:
-        click.echo(f"{Fore.RED}Error during git operation: {e}{Style.RESET_ALL}")
+    except Exception as e:
+        click.echo(f"{Fore.RED}Error creating branch: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error during branch creation: {str(e)}")
         raise
 
-def get_last_branch():
-    """Gets the last branch name."""
-    branches = repo.get_branches()
-    if branches.totalCount > 0:
-        return branches[0].name
-    return "master"
+# Commit and push changes to the repository with retries
+def commit_and_push_changes(branch_name, file_path, commit_message):
+    show_stage("Committing and Pushing Changes")
+    for attempt in range(5):  # Retry up to 5 times
+        try:
+            subprocess.run(["git", "fetch"], check=True)
+            subprocess.run(["git", "checkout", branch_name], check=True)
+            subprocess.run(["git", "add", file_path], check=True)
+            subprocess.run(["git", "commit", "-m", commit_message], check=True)
+            subprocess.run(["git", "push", "--set-upstream", "origin", branch_name], check=True)
+            click.echo(f"{Fore.GREEN}Changes committed and pushed to branch '{branch_name}'.{Style.RESET_ALL}")
+            return
+        except subprocess.CalledProcessError as e:
+            if attempt < 4:
+                click.echo(f"{Fore.YELLOW}Error during git operation (attempt {attempt + 1}/5): {e}{Style.RESET_ALL}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                click.echo(f"{Fore.RED}Error during git operation: {e}{Style.RESET_ALL}")
+                logging.error(f"Git operation error: {str(e)}")
+                raise
 
+# Create a pull request on GitHub
 def create_pull_request(branch_name, title, body):
-    """Creates a pull request."""
     show_stage("Creating Pull Request")
     try:
         pr = repo.create_pull(
@@ -362,173 +254,174 @@ def create_pull_request(branch_name, title, body):
             base="master"
         )
         click.echo(f"{Fore.GREEN}Pull request created: {pr.html_url}{Style.RESET_ALL}")
-    except GithubException as e:
-        if 'A pull request already exists' in str(e):
-            click.echo(f"{Fore.YELLOW}A pull request for branch '{branch_name}' already exists.{Style.RESET_ALL}")
-        else:
-            click.echo(f"{Fore.RED}Failed to create pull request: {e}{Style.RESET_ALL}")
-            raise
+    except Exception as e:
+        click.echo(f"{Fore.RED}Failed to create pull request: {e}{Style.RESET_ALL}")
+        logging.error(f"Error during PR creation: {str(e)}")
+        raise
 
-class NotificationSystem:
-    def __init__(self, title, message, timeout=10):
-        self.title = title
-        self.message = message
-        self.timeout = timeout
+# Create documentation for the new feature
+def create_documentation(feature_name, feature_request):
+    doc_path = os.path.join(DOCS_DIR, f"{feature_name}.md")
+    doc_content = f"# {feature_name}\n\n## Feature Overview\n{feature_request}\n\n## Usage\n```python\nfrom features import {feature_name}\n{feature_name}.main()\n```\n"
+    with open(doc_path, 'w') as doc_file:
+        doc_file.write(doc_content)
+    click.echo(f"{Fore.GREEN}Documentation for '{feature_name}' created at {doc_path}.{Style.RESET_ALL}")
 
-    def send_notification(self):
-        """Send a desktop notification if supported."""
-        if os.getenv('DISPLAY') or sys.platform.startswith('win') or sys.platform.startswith('darwin'):
-            try:
-                notification.notify(
-                    title=self.title,
-                    message=self.message,
-                    app_name='Mr. Pickles',
-                    timeout=self.timeout
-                )
-                click.echo(f"{Fore.GREEN}Notification sent: {self.title} - {self.message}{Style.RESET_ALL}")
-            except Exception as e:
-                click.echo(f"{Fore.RED}Failed to send notification: {str(e)}{Style.RESET_ALL}")
-        else:
-            click.echo(f"{Fore.YELLOW}Notifications are not supported in this environment.{Style.RESET_ALL}")
+def get_last_branch():
+    try:
+        branches = list(repo.get_branches())
+        return branches[0].name
+    except Exception as e:
+        click.echo(f"{Fore.RED}Error fetching branches: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error fetching branches: {str(e)}")
+        raise
 
-    def schedule_notification(self, notif_time):
-        """Schedules a notification at a specific time."""
-        def check_time():
-            while True:
-                current_time = datetime.datetime.now().time().replace(second=0, microsecond=0)
-                if current_time == notif_time:
-                    self.send_notification()
-                    break
-                time.sleep(30)  # Check every 30 seconds
+# Function to initialize a new project with boilerplate code
+def initialize_new_project(project_name):
+    project_path = os.path.join(PROJECTS_DIR, project_name)
+    os.makedirs(project_path, exist_ok=True)
 
-        thread = threading.Thread(target=check_time)
-        thread.start()
+    # Basic project structure
+    os.makedirs(os.path.join(project_path, 'src'), exist_ok=True)
+    os.makedirs(os.path.join(project_path, 'tests'), exist_ok=True)
+    os.makedirs(os.path.join(project_path, 'docs'), exist_ok=True)
+    
+    # Creating README.md
+    with open(os.path.join(project_path, 'README.md'), 'w') as readme_file:
+        readme_content = f"# {project_name}\n\nThis is the README for {project_name}.\n"
+        readme_file.write(readme_content)
+    
+    # Creating basic setup files
+    with open(os.path.join(project_path, 'requirements.txt'), 'w') as req_file:
+        req_file.write("# Add your project dependencies here.\n")
+
+    with open(os.path.join(project_path, 'setup.py'), 'w') as setup_file:
+        setup_content = f"""from setuptools import setup, find_packages
+
+setup(
+    name='{project_name}',
+    version='0.1.0',
+    packages=find_packages(where="src"),
+    package_dir={{'': 'src'}},
+    install_requires=[],
+)
+"""
+        setup_file.write(setup_content)
+    
+    click.echo(f"{Fore.GREEN}New project '{project_name}' initialized at {project_path}.{Style.RESET_ALL}")
+
+# Cool-styled, hellish menu for Mr. Pickles
+def show_main_menu():
+    click.echo(f"{Fore.RED}{Style.BRIGHT}")
+    click.echo("#######################################")
+    click.echo("#                                     #")
+    click.echo("#        WELCOME TO MR. PICKLES       #")
+    click.echo("#            CODE FROM HELL           #")
+    click.echo("#                                     #")
+    click.echo("#######################################")
+    click.echo(f"{Fore.YELLOW}{Style.BRIGHT}")
+    click.echo("1. Summon a New Project")
+    click.echo("2. Request a Feature")
+    click.echo("3. View Help")
+    click.echo("4. Offer a Sacrifice (Exit)")
+    click.echo(f"{Fore.RED}{Style.BRIGHT}")
+    click.echo("#######################################")
+    click.echo(f"{Style.RESET_ALL}")
 
 @click.command()
-OPENING_PHRASES = [
-    "What do you seek, mortal?",
-    "Speak your wish, and it shall be granted.",
-    "Ask, and you shall receive... probably.",
-    "What can Mr. Pickles do for you today?",
-    "Ready for more Python magic?",
-    "Back for more, I see. What'll it be this time?",
-]
 def ask():
-    while True:
-        opening_phrase = random.choice(OPENING_PHRASES)
-        query = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}{opening_phrase}{Style.RESET_ALL}")
-def ask():
-    """Continuously send queries to the AI, review code, and create pull requests."""
-    # Initialize the notification system with an example reminder
-    reminder = NotificationSystem("Reminder", "Don't forget to check the system updates!")
-    # Schedule a notification for a specific time (e.g., 9 AM)
-    notif_time = datetime.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0).time()
-    reminder.schedule_notification(notif_time)
+from features import monitoring-tools
 
     while True:
-        # Get the user's query
-        query = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}What do you seek, mortal?{Style.RESET_ALL}")
-
-        if query.lower() in ["exit", "quit"]:
-            click.echo(f"{Fore.CYAN}The darkness recedes... for now.{Style.RESET_ALL}")
-            break
-
-        # Load previous conversation history
-        conversation_history = load_conversation_history()
-
-        # Analyze conversation history for contextual recall
-        related_past_responses = analyze_conversation_history(conversation_history, query)
-        if related_past_responses:
-            click.echo(f"{Fore.CYAN}I recall you have asked similar things before:{Style.BRIGHT}")
-            for past in related_past_responses:
-                click.echo(f"- {Fore.YELLOW}You asked: {past}{Style.RESET_ALL}")
-
-        # Display Mr. Pickles' ASCII art
         display_ascii_mr_pickles()
+        show_main_menu()
 
-        # Create a threading event to control the spinner
-        stop_event = threading.Event()
+        choice = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Choose your destiny, mortal (1-4):{Style.RESET_ALL}", type=int)
 
-        try:
-            # Start spinning pentagram animation while processing the response
-            spinner_thread = threading.Thread(target=spinning_pentagram, args=(stop_event,))
-            spinner_thread.start()
+        if choice == 1:
+            project_name = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Name your unholy creation:{Style.RESET_ALL}")
+            initialize_new_project(project_name)
+        elif choice == 2:
+            query = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Speak your feature request, mortal:{Style.RESET_ALL}")
 
-            # Read the current file content
-            current_file_content = read_own_code()
+            conversation_history = load_conversation_history()
+            related_past_responses = analyze_conversation_history(conversation_history, query)
+            if related_past_responses:
+                click.echo(f"{Fore.CYAN}I recall you have asked similar things before: {Style.BRIGHT}")
+                for past in related_past_responses:
+                    click.echo(f"- {Fore.YELLOW}You asked: {past}{Style.RESET_ALL}")
 
-            # Generate code for the feature request
-            code_update = generate_code_for_feature_request(query, current_file_content)
+            stop_event = threading.Event()
 
-            # Stop the spinner
-            stop_event.set()
-            spinner_thread.join()
-            sys.stdout.write('\b')  # Clean up the spinner
-
-            if not code_update:
-                click.echo(f"{Fore.RED}No code was generated. Please try again.{Style.RESET_ALL}")
-                continue
-
-            # Show the generated code to the user for review
-            click.echo(f"{Fore.YELLOW}Generated code:{Style.RESET_ALL}\n{Fore.CYAN}{code_update}{Style.RESET_ALL}")
-
-            # Ask if the user wants to proceed with the pull request
-            proceed = click.confirm(f"{Fore.CYAN}Do you want to proceed with creating a pull request?{Style.RESET_ALL}", default=True)
-
-            if not proceed:
-                click.echo(f"{Fore.CYAN}Operation canceled. No changes were made.{Style.RESET_ALL}")
-                continue
-
-            # Optionally allow the user to edit the code before proceeding
-            modify_code = click.confirm(f"{Fore.CYAN}Would you like to modify the code before proceeding?{Style.RESET_ALL}", default=False)
-            if modify_code:
-                # Launch the user's default editor to modify the code
-                with open("temp_code.py", "w") as temp_code_file:
-                    temp_code_file.write(code_update)
-                click.edit(filename="temp_code.py")
-                with open("temp_code.py", "r") as temp_code_file:
-                    code_update = temp_code_file.read()
-                os.remove("temp_code.py")
-
-            # Insert the new code into the script
-            show_stage("Inserting Code")
-            append_to_own_code(code_update)
-
-            # Get the last branch name or use 'main'
-            last_branch = get_last_branch()
-
-            # Sanitize the branch name
-            branch_name = f"feature/{sanitize_branch_name(query)}"
-            create_branch(branch_name, base_branch=last_branch)
-
-            # Commit and push the changes
-            commit_and_push_changes(branch_name, __file__, f"Implement feature: {query}")
-
-            # Create a pull request
-            pr_title = f"Implement feature: {query}"
-            pr_body = "This pull request implements the feature as requested."
-            create_pull_request(branch_name, pr_title, pr_body)
-
-            # Extract the feature name to test
             try:
-                feature_name = re.search(r'def\s+(\w+)\s*\(', code_update).group(1)
-                test_new_feature(feature_name)
-            except AttributeError:
-                click.echo(f"{Fore.YELLOW}Could not extract feature name for testing.{Style.RESET_ALL}")
+                spinner_thread = threading.Thread(target=spinning_pentagram, args=(stop_event,))
+                spinner_thread.start()
 
-            click.echo(f"{Fore.GREEN}Process completed successfully!{Style.RESET_ALL}")
+                code_update = generate_code_for_feature_request(query)
+                feature_name = sanitize_branch_name(query)
+                feature_file_path = os.path.join(FEATURE_DIR, f"{feature_name}.py")
 
-            # Save the AI's response to conversation history
-            conversation_history.append({"role": "assistant", "content": code_update})
+                stop_event.set()
+                spinner_thread.join()
+                sys.stdout.write('\b')
+
+                click.echo(f"{Fore.YELLOW}Generated code:{Style.RESET_ALL}\n{Fore.CYAN}{code_update}{Style.RESET_ALL}")
+
+                proceed = click.confirm(f"{Fore.CYAN}Do you want to proceed with creating a pull request?{Style.RESET_ALL}", default=True)
+                if not proceed:
+                    click.echo(f"{Fore.CYAN}Operation canceled. No changes were made.{Style.RESET_ALL}")
+                    continue
+
+                modify_code = click.confirm(f"{Fore.CYAN}Would you like to modify the code before proceeding?{Style.RESET_ALL}", default=False)
+                if modify_code:
+                    with open(feature_file_path, "w") as temp_code_file:
+                        temp_code_file.write(code_update)
+                    click.edit(filename=feature_file_path)
+                    with open(feature_file_path, "r") as temp_code_file:
+                        code_update = temp_code_file.read()
+
+                show_stage("Inserting Code")
+                append_to_own_code(code_update, feature_name)
+                create_documentation(feature_name, query)
+
+                last_branch = get_last_branch()
+                branch_name = f"feature/{sanitize_branch_name(query)}"
+                create_branch(branch_name, base_branch=last_branch)
+                commit_and_push_changes(branch_name, __file__, f"Implement feature: {query}")
+                commit_and_push_changes(branch_name, feature_file_path, f"Add feature: {query}")
+                commit_and_push_changes(branch_name, os.path.join(DOCS_DIR, f"{feature_name}.md"), f"Add documentation for {feature_name}")
+
+                pr_title = f"Implement feature: {query}"
+                pr_body = f"This pull request implements the {query} feature and includes documentation."
+                create_pull_request(branch_name, pr_title, pr_body)
+
+                click.echo(f"{Fore.GREEN}Process completed successfully!{Style.RESET_ALL}")
+
+                conversation_history.append({"role": "assistant", "content": code_update})
+                save_conversation_history(conversation_history)
             
-            # Save updated conversation history to file
-            save_conversation_history(conversation_history)
+            except Exception as e:
+                stop_event.set()
+                spinner_thread.join()
+                sys.stdout.write('\b')
+                click.echo(f"{Fore.RED}An error occurred: {str(e)}{Style.RESET_ALL}")
+                logging.error(f"Error in process: {str(e)}")
 
-        except Exception as e:
-            stop_event.set()
-            spinner_thread.join()
-            sys.stdout.write('\b')  # Clean up the spinner
-            click.echo(f"{Fore.RED}An error occurred: {str(e)}{Style.RESET_ALL}")
+        elif choice == 3:
+            click.echo(f"{Fore.YELLOW}{Style.BRIGHT}")
+            click.echo("#######################################")
+            click.echo("#         MR. PICKLES HELP MENU       #")
+            click.echo("# 1. Summon a New Project: Create a new project with a basic structure.")
+            click.echo("# 2. Request a Feature: Request a new feature and let Mr. Pickles handle the coding.")
+            click.echo("# 3. View Help: You're here now, aren't you?")
+            click.echo("# 4. Offer a Sacrifice: Exit Mr. Pickles' domain.")
+            click.echo("#######################################")
+            click.echo(f"{Style.RESET_ALL}")
+        elif choice == 4:
+            click.echo(f"{Fore.RED}{Style.BRIGHT}Mr. Pickles will remember you...{Style.RESET_ALL}")
+            break
+        else:
+            click.echo(f"{Fore.RED}{Style.BRIGHT}Invalid choice. Choose wisely, or face the consequences...{Style.RESET_ALL}")
 
 if __name__ == '__main__':
     ask()

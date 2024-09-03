@@ -1,1 +1,4 @@
 env*
+conversation*
+feature*
+*.log
