@@ -330,8 +330,6 @@ def show_main_menu():
 
 @click.command()
 def ask():
-from features import monitoring-tools
-
     while True:
         display_ascii_mr_pickles()
         show_main_menu()
