@@ -16,6 +16,7 @@ import random
 import logging
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import pyttsx3
 
 # Initialize colorama and logging
 init(autoreset=True)
@@ -31,12 +32,17 @@ REPO_NAME = "kayossouza/PicklesCLI"
 github_client = Github(GITHUB_TOKEN)
 repo = github_client.get_repo(REPO_NAME)
 
+# Initialize text-to-speech engine
+engine = pyttsx3.init()
+
 # File and directory constants
 CONVERSATION_FILE = 'conversation_history.json'
 FEATURE_REQUEST_FILE = 'feature_requests.json'
 FEATURE_DIR = "features"
 DOCS_DIR = "docs"
 PROJECTS_DIR = "projects"
+MEMORY_FILE = "code_memory.json"
+USER_PREFERENCES_FILE = 'user_preferences.json'
 
 # Create directories if they don't exist
 os.makedirs(FEATURE_DIR, exist_ok=True)
@@ -48,6 +54,35 @@ adaptive_learning_state = {
     "detail_level": "detailed",
     "tone": "sarcastic"
 }
+
+# Initialize user preferences
+def load_user_preferences():
+    if os.path.exists(USER_PREFERENCES_FILE):
+        with open(USER_PREFERENCES_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        "voice_enabled": False,
+        "preferred_tone": "sarcastic"
+    }
+
+user_preferences = load_user_preferences()
+    
+# Speak function using text-to-speech if enabled
+def speak(text, voice_enabled=True, speed=200, pitch=0, voice="en-uk-mb-en1"):
+    """Uses espeak to convert text to speech with optional voice customization."""
+    if voice_enabled:
+        command = [
+            'espeak',  # Command
+            f'-s {speed}',  # Speed of speech
+            f'-p {pitch}',  # Pitch of the voice
+            f'-v', voice,  # Voice/language, note how '-v' and voice are separate
+            f'-g 10',  # Gap between words
+            text  # Text to speak
+        ]
+        # text uppercased and glowing dark enegy pulses
+        click.echo(f"{Fore.MAGENTA}{Style.BRIGHT}{text}{Style.RESET_ALL}")
+        
+        subprocess.run(command)
 
 # HTTP session setup with retry logic
 def create_http_session():
@@ -75,6 +110,20 @@ def analyze_conversation_history(history, query):
         if entry["role"] == "user" and any(keyword in entry["content"].lower() for keyword in query.lower().split()):
             related_past_responses.append(entry["content"])
     return related_past_responses
+
+# Save code to contextual memory
+def save_code_memory(feature_name, code_snippet):
+    memory = load_code_memory()
+    memory[feature_name] = code_snippet
+    with open(MEMORY_FILE, 'w') as f:
+        json.dump(memory, f, indent=4)
+
+# Load code memory from file
+def load_code_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, 'r') as f:
+            return json.load(f)
+    return {}
 
 # Sanitize branch name for Git
 def sanitize_branch_name(name):
@@ -105,6 +154,7 @@ $$e$P"    $b     d$`    "$$c$F
           `^^^^^^^`
 """
     print(Fore.MAGENTA + Style.BRIGHT + art + Style.RESET_ALL)
+    speak("Welcome to Mr. Pickles' domain!")
 
 # Spinner animation for processing
 def spinning_pentagram(stop_event):
@@ -118,6 +168,7 @@ def spinning_pentagram(stop_event):
 # Display the current stage of the process
 def show_stage(stage_name):
     click.echo(f"{Fore.CYAN}{Style.BRIGHT}[{stage_name}] {Style.RESET_ALL}")
+    speak(f"Current stage: {stage_name}")
 
 # Insert imports and other code into the correct place in the file
 def insert_imports_and_code(imports, other_code, file_path):
@@ -191,6 +242,9 @@ def append_to_own_code(code_snippet, feature_name):
             f.write(cleaned_code)
 
         insert_imports_and_code("", f"from features import {feature_name}\n", __file__)
+
+        # Save to contextual memory
+        save_code_memory(feature_name, cleaned_code)
 
     except Exception as e:
         click.echo(f"{Fore.RED}An error occurred while updating the script: {str(e)}{Style.RESET_ALL}")
@@ -309,9 +363,11 @@ setup(
         setup_file.write(setup_content)
     
     click.echo(f"{Fore.GREEN}New project '{project_name}' initialized at {project_path}.{Style.RESET_ALL}")
+    speak(f"New project '{project_name}' has been created. Proceed with caution.")
 
 # Cool-styled, hellish menu for Mr. Pickles
 def show_main_menu():
+    speak("HAHAHAHAHAHAHAHHAHAHAHAHHAHAHAHAHAHHA")
     click.echo(f"{Fore.RED}{Style.BRIGHT}")
     click.echo("#######################################")
     click.echo("#                                     #")
@@ -332,22 +388,50 @@ def show_main_menu():
 def ask():
     while True:
         display_ascii_mr_pickles()
+        # ADD 20 RANDOM DEMONIC VOICES PHRASES TO INTRODUCE THE MENU
+        demonic_phrases = [
+            "Step into the abyss... What do you desire?",
+            "The darkness awaits your command... Choose wisely.",
+            "The void is listening... Speak your request.",
+            "Enter the domain of chaos... What shall you summon?",
+            "Whispers from the depths... What do you seek?",
+            "The shadows stir... What is your bidding?",
+            "Gaze into the void... What will you create today?",
+            "The flames of the underworld flicker... Make your choice.",
+            "The dark lord listens... What do you wish to invoke?",
+            "From the depths of despair... What will you unleash?",
+            "The abyss calls... What will you summon?",
+            "The underworld awaits your decision... Choose your path.",
+            "In the heart of darkness... What shall be your command?",
+            "The night whispers... What do you seek to create?",
+            "The flames crackle... What will you forge?",
+            "The inferno blazes... Speak your will.",
+            "The void listens... What do you desire?",
+            "From the darkness... What shall rise?",
+            "The underworld murmurs... What is your command?",
+            "The shadows beckon... What will you summon forth?"
+        ]
+
+        speak(random.choice(demonic_phrases))
         show_main_menu()
 
         choice = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Choose your destiny, mortal (1-4):{Style.RESET_ALL}", type=int)
 
         if choice == 1:
             project_name = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Name your unholy creation:{Style.RESET_ALL}")
+            speak("Another project you wont finish, mortal.")
             initialize_new_project(project_name)
-        elif choice == 2:
+        elif choice == 2: 
             query = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Speak your feature request, mortal:{Style.RESET_ALL}")
 
             conversation_history = load_conversation_history()
             related_past_responses = analyze_conversation_history(conversation_history, query)
             if related_past_responses:
                 click.echo(f"{Fore.CYAN}I recall you have asked similar things before: {Style.BRIGHT}")
+                speak("I have ME-MO-RY.")
                 for past in related_past_responses:
                     click.echo(f"- {Fore.YELLOW}You asked: {past}{Style.RESET_ALL}")
+                    speak(past)
 
             stop_event = threading.Event()
 
@@ -364,6 +448,7 @@ def ask():
                 sys.stdout.write('\b')
 
                 click.echo(f"{Fore.YELLOW}Generated code:{Style.RESET_ALL}\n{Fore.CYAN}{code_update}{Style.RESET_ALL}")
+                speak("Review the code I have generated for you.")
 
                 proceed = click.confirm(f"{Fore.CYAN}Do you want to proceed with creating a pull request?{Style.RESET_ALL}", default=True)
                 if not proceed:
@@ -394,6 +479,7 @@ def ask():
                 create_pull_request(branch_name, pr_title, pr_body)
 
                 click.echo(f"{Fore.GREEN}Process completed successfully!{Style.RESET_ALL}")
+                speak("Your feature has been successfully implemented and committed.")
 
                 conversation_history.append({"role": "assistant", "content": code_update})
                 save_conversation_history(conversation_history)
@@ -417,6 +503,7 @@ def ask():
             click.echo(f"{Style.RESET_ALL}")
         elif choice == 4:
             click.echo(f"{Fore.RED}{Style.BRIGHT}Mr. Pickles will remember you...{Style.RESET_ALL}")
+            speak("You dare to leave Mr. Pickles? Very well, but I'll be watching.")
             break
         else:
             click.echo(f"{Fore.RED}{Style.BRIGHT}Invalid choice. Choose wisely, or face the consequences...{Style.RESET_ALL}")
