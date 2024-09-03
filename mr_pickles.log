@@ -1,0 +1,9 @@
+ERROR:root:Error in process: 
+ERROR:root:Error in process: 
+ERROR:root:Git operation error: Command '['git', 'checkout', 'feature/monitoring-tools']' returned non-zero exit status 1.
+ERROR:root:Error in process: Command '['git', 'checkout', 'feature/monitoring-tools']' returned non-zero exit status 1.
+ERROR:root:Git operation error: Command '['git', 'commit', '-m', 'Implement feature: sentry implementation']' returned non-zero exit status 1.
+ERROR:root:Error in process: Command '['git', 'commit', '-m', 'Implement feature: sentry implementation']' returned non-zero exit status 1.
+ERROR:root:Syntax error in generated code: invalid syntax (<unknown>, line 1)
+ERROR:root:Git operation error: Command '['git', 'commit', '-m', 'Implement feature: implement payment system']' returned non-zero exit status 1.
+ERROR:root:Error in process: Command '['git', 'commit', '-m', 'Implement feature: implement payment system']' returned non-zero exit status 1.
