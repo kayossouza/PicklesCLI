@@ -1,39 +1,138 @@
-import click
-from openai import OpenAI
 import os
-from colorama import Fore, Style, init
-import random
+import click
+import openai
 import json
 import itertools
 import sys
 import time
 import threading
-from github import Github
+import re
+import ast
 import subprocess
+from github import Github
+from colorama import Fore, Style, init
+from plyer import notification
+import random
+import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import pyttsx3
 
-# Initialize colorama
+# Initialize colorama and logging
 init(autoreset=True)
+LOG_FILE = "mr_pickles.log"
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO)
 
-# Ensure the OpenAI API key is set as an environment variable
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-
-# Ensure the GitHub token is set as an environment variable
+# Set API keys and repository details
+openai.api_key = os.getenv('OPENAI_API_KEY')
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-REPO_NAME = "your-username/mr-pickles"  # Replace with your repo name
+REPO_NAME = "kayossouza/PicklesCLI"
 
 # Initialize GitHub client
 github_client = Github(GITHUB_TOKEN)
 repo = github_client.get_repo(REPO_NAME)
 
+# Initialize text-to-speech engine
+engine = pyttsx3.init()
+
+# File and directory constants
 CONVERSATION_FILE = 'conversation_history.json'
 FEATURE_REQUEST_FILE = 'feature_requests.json'
+FEATURE_DIR = "features"
+DOCS_DIR = "docs"
+PROJECTS_DIR = "projects"
+MEMORY_FILE = "code_memory.json"
+USER_PREFERENCES_FILE = 'user_preferences.json'
 
-# Simple adaptive learning state
+# Create directories if they don't exist
+os.makedirs(FEATURE_DIR, exist_ok=True)
+os.makedirs(DOCS_DIR, exist_ok=True)
+os.makedirs(PROJECTS_DIR, exist_ok=True)
+
+# Adaptive learning state for Mr. Pickles
 adaptive_learning_state = {
-    "detail_level": "detailed",  # can be "normal" or "detailed"
-    "tone": "sarcastic"  # can be "neutral" or "sarcastic"
+    "detail_level": "detailed",
+    "tone": "sarcastic"
 }
 
+# Initialize user preferences
+def load_user_preferences():
+    if os.path.exists(USER_PREFERENCES_FILE):
+        with open(USER_PREFERENCES_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        "voice_enabled": False,
+        "preferred_tone": "sarcastic"
+    }
+
+user_preferences = load_user_preferences()
+    
+# Speak function using text-to-speech if enabled
+def speak(text, voice_enabled=True, speed=200, pitch=0, voice="en-uk-mb-en1"):
+    """Uses espeak to convert text to speech with optional voice customization."""
+    if voice_enabled:
+        command = [
+            'espeak',  # Command
+            f'-s {speed}',  # Speed of speech
+            f'-p {pitch}',  # Pitch of the voice
+            f'-v', voice,  # Voice/language, note how '-v' and voice are separate
+            f'-g 10',  # Gap between words
+            text  # Text to speak
+        ]
+        # text uppercased and glowing dark enegy pulses
+        click.echo(f"{Fore.MAGENTA}{Style.BRIGHT}{text}{Style.RESET_ALL}")
+        
+        subprocess.run(command)
+
+# HTTP session setup with retry logic
+def create_http_session():
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    return session
+
+# Load conversation history from file
+def load_conversation_history():
+    if os.path.exists(CONVERSATION_FILE):
+        with open(CONVERSATION_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+# Save conversation history to file
+def save_conversation_history(history):
+    with open(CONVERSATION_FILE, 'w') as f:
+        json.dump(history, f, indent=4)
+
+# Analyze conversation history for context and recall
+def analyze_conversation_history(history, query):
+    related_past_responses = []
+    for entry in history:
+        if entry["role"] == "user" and any(keyword in entry["content"].lower() for keyword in query.lower().split()):
+            related_past_responses.append(entry["content"])
+    return related_past_responses
+
+# Save code to contextual memory
+def save_code_memory(feature_name, code_snippet):
+    memory = load_code_memory()
+    memory[feature_name] = code_snippet
+    with open(MEMORY_FILE, 'w') as f:
+        json.dump(memory, f, indent=4)
+
+# Load code memory from file
+def load_code_memory():
+    if os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+# Sanitize branch name for Git
+def sanitize_branch_name(name):
+    sanitized_name = re.sub(r'[^a-zA-Z0-9\-]', '-', name)
+    sanitized_name = re.sub(r'-+', '-', sanitized_name)
+    sanitized_name = sanitized_name.strip('-')
+    return sanitized_name[:20]
+
+# Display Mr. Pickles' ASCII art
 def display_ascii_mr_pickles():
     art = r"""
             ______              
@@ -55,255 +154,359 @@ $$e$P"    $b     d$`    "$$c$F
           `^^^^^^^`
 """
     print(Fore.MAGENTA + Style.BRIGHT + art + Style.RESET_ALL)
+    speak("Welcome to Mr. Pickles' domain!")
 
+# Spinner animation for processing
 def spinning_pentagram(stop_event):
     spinner = itertools.cycle(['◢', '◣', '◤', '◥'])
-
     while not stop_event.is_set():
         sys.stdout.write(Fore.MAGENTA + next(spinner) + Style.RESET_ALL)
         sys.stdout.flush()
         time.sleep(0.1)
         sys.stdout.write('\b')
 
-def read_own_code():
-    with open(__file__, 'r') as f:
-        return f.read()
+# Display the current stage of the process
+def show_stage(stage_name):
+    click.echo(f"{Fore.CYAN}{Style.BRIGHT}[{stage_name}] {Style.RESET_ALL}")
+    speak(f"Current stage: {stage_name}")
 
-def append_to_own_code(code_snippet):
-    """Append the generated code snippet to the script file."""
+# Insert imports and other code into the correct place in the file
+def insert_imports_and_code(imports, other_code, file_path):
     try:
-        with open(__file__, 'a') as f:
-            f.write("\n\n" + code_snippet)
-        click.echo(f"{Fore.GREEN}Code successfully appended to Mr. Pickles' script.{Style.RESET_ALL}")
+        with open(file_path, 'r') as f:
+            file_content = f.readlines()
+
+        import_insertion_index = 0
+        for i, line in enumerate(file_content):
+            if line.strip().startswith("import ") or line.strip().startswith("from "):
+                import_insertion_index = i + 1
+
+        if imports:
+            file_content.insert(import_insertion_index, imports + "\n")
+
+        insertion_index = None
+        for i in reversed(range(len(file_content))):
+            if file_content[i].strip().startswith("@"):
+                continue
+            if file_content[i].strip().startswith(("def ", "class ")):
+                insertion_index = i + 1
+                break
+
+        if insertion_index is None:
+            insertion_index = len(file_content)
+
+        if other_code:
+            file_content.insert(insertion_index, other_code + "\n")
+
+        with open(file_path, 'w') as f:
+            f.writelines(file_content)
+
+        click.echo(f"{Fore.GREEN}Code successfully inserted into {file_path}.{Style.RESET_ALL}")
+
     except Exception as e:
         click.echo(f"{Fore.RED}An error occurred while updating the script: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error inserting code: {str(e)}")
 
-def load_conversation_history():
-    if os.path.exists(CONVERSATION_FILE):
-        with open(CONVERSATION_FILE, 'r') as f:
-            return json.load(f)
-    return []
+# Append generated code to the script, ensuring only executable Python code is inserted
+def append_to_own_code(code_snippet, feature_name):
+    try:
+        parsed_code_snippet = []
+        inside_code_block = False
 
-def save_conversation_history(history):
-    with open(CONVERSATION_FILE, 'w') as f:
-        json.dump(history, f, indent=4)
+        for line in code_snippet.split("\n"):
+            stripped_line = line.strip()
 
-def load_feature_requests():
-    if os.path.exists(FEATURE_REQUEST_FILE):
-        with open(FEATURE_REQUEST_FILE, 'r') as f:
-            return json.load(f)
-    return []
+            if stripped_line.startswith("```python"):
+                inside_code_block = True
+                continue
+            elif stripped_line.startswith("```"):
+                inside_code_block = False
+                continue
 
-def save_feature_requests(requests):
-    with open(FEATURE_REQUEST_FILE, 'w') as f:
-        json.dump(requests, f, indent=4)
+            if inside_code_block:
+                parsed_code_snippet.append(line)
+            elif not inside_code_block and stripped_line.startswith(("class ", "def ", "import ", "from ")):
+                parsed_code_snippet.append(line)
 
-def update_feature_request_status(request, status):
-    """Update the status of a feature request."""
-    feature_requests = load_feature_requests()
-    for fr in feature_requests:
-        if fr["request"] == request:
-            fr["status"] = status
-            break
-    save_feature_requests(feature_requests)
+        cleaned_code = "\n".join(parsed_code_snippet)
 
-def analyze_conversation_history(history, query):
-    """Analyze conversation history to detect patterns or recurring topics."""
-    related_past_responses = []
-    for entry in history:
-        if entry["role"] == "user" and any(keyword in entry["content"].lower() for keyword in query.lower().split()):
-            related_past_responses.append(entry["content"])
-    return related_past_responses
+        try:
+            ast.parse(cleaned_code)
+        except SyntaxError as e:
+            click.echo(f"{Fore.RED}The generated code contains syntax errors: {e}{Style.RESET_ALL}")
+            logging.error(f"Syntax error in generated code: {str(e)}")
+            return
 
-def update_adaptive_learning_state(feedback):
-    """Adjust tone and detail level based on feedback."""
-    if "more detail" in feedback.lower():
-        adaptive_learning_state["detail_level"] = "detailed"
-    if "less sarcasm" in feedback.lower():
-        adaptive_learning_state["tone"] = "neutral"
+        feature_file_path = os.path.join(FEATURE_DIR, f"{feature_name}.py")
+        with open(feature_file_path, 'w') as f:
+            f.write(cleaned_code)
 
-def log_feature_request(request):
-    """Log a feature request to the file."""
-    feature_requests = load_feature_requests()
-    feature_requests.append({"request": request, "status": "pending"})
-    save_feature_requests(feature_requests)
+        insert_imports_and_code("", f"from features import {feature_name}\n", __file__)
 
+        # Save to contextual memory
+        save_code_memory(feature_name, cleaned_code)
+
+    except Exception as e:
+        click.echo(f"{Fore.RED}An error occurred while updating the script: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error updating script: {str(e)}")
+
+# Generate code for a feature request using OpenAI
 def generate_code_for_feature_request(feature_request):
-    """Generate code based on the feature request."""
+    show_stage("Generating Code")
     messages = [
-        {"role": "system", "content": "You are Mr. Pickles, the god of software engineering. Generate a Python function to implement the following feature request."},
-        {"role": "user", "content": feature_request}
+        {"role": "system", "content": "You are Mr. Pickles, a highly skilled and sarcastic AI software engineer assistant. Your goal is to generate high-quality, efficient, and clean Python code for specific feature requests. You should provide code that is ready to be inserted directly into a Python script, without additional modifications needed."},
+        {"role": "user", "content": f"The user is requesting the following feature: {feature_request}. Please generate the necessary Python code, ensuring that it follows best practices and is optimized for readability and performance."}
     ]
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
         messages=messages
     )
-    return response.choices[0].message.content
+    return response.choices[0].message['content']
 
-def test_new_feature(feature_name):
-    """Test the newly implemented feature."""
+# Create a new branch for the feature
+def create_branch(branch_name, base_branch="master"):
+    show_stage("Creating Branch")
     try:
-        exec(f'{feature_name}()')
-        click.echo(f"{Fore.GREEN}Feature '{feature_name}' tested successfully!{Style.RESET_ALL}")
+        base = repo.get_branch(base_branch)
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base.commit.sha)
+        click.echo(f"{Fore.GREEN}Branch '{branch_name}' created from '{base_branch}'.{Style.RESET_ALL}")
     except Exception as e:
-        click.echo(f"{Fore.RED}An error occurred while testing the feature: {str(e)}{Style.RESET_ALL}")
+        click.echo(f"{Fore.RED}Error creating branch: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error during branch creation: {str(e)}")
+        raise
 
-def create_branch(branch_name):
-    """Create a new branch from the base branch."""
-    base = repo.get_branch("main")
-    repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base.commit.sha)
-    print(f"Branch '{branch_name}' created from 'main'.")
-
+# Commit and push changes to the repository with retries
 def commit_and_push_changes(branch_name, file_path, commit_message):
-    """Commit changes and push to the branch."""
-    try:
-        subprocess.run(["git", "checkout", branch_name], check=True)
-        subprocess.run(["git", "add", file_path], check=True)
-        subprocess.run(["git", "commit", "-m", commit_message], check=True)
-        subprocess.run(["git", "push", "--set-upstream", "origin", branch_name], check=True)
-        print(f"Changes committed and pushed to branch '{branch_name}'.")
-    except subprocess.CalledProcessError as e:
-        print(f"Error during git operation: {e}")
+    show_stage("Committing and Pushing Changes")
+    for attempt in range(5):  # Retry up to 5 times
+        try:
+            subprocess.run(["git", "fetch"], check=True)
+            subprocess.run(["git", "checkout", branch_name], check=True)
+            subprocess.run(["git", "add", file_path], check=True)
+            subprocess.run(["git", "commit", "-m", commit_message], check=True)
+            subprocess.run(["git", "push", "--set-upstream", "origin", branch_name], check=True)
+            click.echo(f"{Fore.GREEN}Changes committed and pushed to branch '{branch_name}'.{Style.RESET_ALL}")
+            return
+        except subprocess.CalledProcessError as e:
+            if attempt < 4:
+                click.echo(f"{Fore.YELLOW}Error during git operation (attempt {attempt + 1}/5): {e}{Style.RESET_ALL}")
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                click.echo(f"{Fore.RED}Error during git operation: {e}{Style.RESET_ALL}")
+                logging.error(f"Git operation error: {str(e)}")
+                raise
 
+# Create a pull request on GitHub
 def create_pull_request(branch_name, title, body):
-    """Create a pull request."""
+    show_stage("Creating Pull Request")
     try:
         pr = repo.create_pull(
             title=title,
             body=body,
             head=branch_name,
-            base="main"
+            base="master"
         )
-        print(f"Pull request created: {pr.html_url}")
+        click.echo(f"{Fore.GREEN}Pull request created: {pr.html_url}{Style.RESET_ALL}")
     except Exception as e:
-        print(f"Failed to create pull request: {e}")
+        click.echo(f"{Fore.RED}Failed to create pull request: {e}{Style.RESET_ALL}")
+        logging.error(f"Error during PR creation: {str(e)}")
+        raise
+
+# Create documentation for the new feature
+def create_documentation(feature_name, feature_request):
+    doc_path = os.path.join(DOCS_DIR, f"{feature_name}.md")
+    doc_content = f"# {feature_name}\n\n## Feature Overview\n{feature_request}\n\n## Usage\n```python\nfrom features import {feature_name}\n{feature_name}.main()\n```\n"
+    with open(doc_path, 'w') as doc_file:
+        doc_file.write(doc_content)
+    click.echo(f"{Fore.GREEN}Documentation for '{feature_name}' created at {doc_path}.{Style.RESET_ALL}")
+
+def get_last_branch():
+    try:
+        branches = list(repo.get_branches())
+        return branches[0].name
+    except Exception as e:
+        click.echo(f"{Fore.RED}Error fetching branches: {str(e)}{Style.RESET_ALL}")
+        logging.error(f"Error fetching branches: {str(e)}")
+        raise
+
+# Function to initialize a new project with boilerplate code
+def initialize_new_project(project_name):
+    project_path = os.path.join(PROJECTS_DIR, project_name)
+    os.makedirs(project_path, exist_ok=True)
+
+    # Basic project structure
+    os.makedirs(os.path.join(project_path, 'src'), exist_ok=True)
+    os.makedirs(os.path.join(project_path, 'tests'), exist_ok=True)
+    os.makedirs(os.path.join(project_path, 'docs'), exist_ok=True)
+    
+    # Creating README.md
+    with open(os.path.join(project_path, 'README.md'), 'w') as readme_file:
+        readme_content = f"# {project_name}\n\nThis is the README for {project_name}.\n"
+        readme_file.write(readme_content)
+    
+    # Creating basic setup files
+    with open(os.path.join(project_path, 'requirements.txt'), 'w') as req_file:
+        req_file.write("# Add your project dependencies here.\n")
+
+    with open(os.path.join(project_path, 'setup.py'), 'w') as setup_file:
+        setup_content = f"""from setuptools import setup, find_packages
+
+setup(
+    name='{project_name}',
+    version='0.1.0',
+    packages=find_packages(where="src"),
+    package_dir={{'': 'src'}},
+    install_requires=[],
+)
+"""
+        setup_file.write(setup_content)
+    
+    click.echo(f"{Fore.GREEN}New project '{project_name}' initialized at {project_path}.{Style.RESET_ALL}")
+    speak(f"New project '{project_name}' has been created. Proceed with caution.")
+
+# Cool-styled, hellish menu for Mr. Pickles
+def show_main_menu():
+    speak("HAHAHAHAHAHAHAHHAHAHAHAHHAHAHAHAHAHHA")
+    click.echo(f"{Fore.RED}{Style.BRIGHT}")
+    click.echo("#######################################")
+    click.echo("#                                     #")
+    click.echo("#        WELCOME TO MR. PICKLES       #")
+    click.echo("#            CODE FROM HELL           #")
+    click.echo("#                                     #")
+    click.echo("#######################################")
+    click.echo(f"{Fore.YELLOW}{Style.BRIGHT}")
+    click.echo("1. Summon a New Project")
+    click.echo("2. Request a Feature")
+    click.echo("3. View Help")
+    click.echo("4. Offer a Sacrifice (Exit)")
+    click.echo(f"{Fore.RED}{Style.BRIGHT}")
+    click.echo("#######################################")
+    click.echo(f"{Style.RESET_ALL}")
 
 @click.command()
 def ask():
-    """Continuously send queries to the AI and display the responses."""
-
     while True:
-        # Get the user's query
-        query = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}What do you seek, mortal?{Style.RESET_ALL}")
-
-        if query.lower() in ["exit", "quit"]:
-            click.echo(f"{Fore.CYAN}The darkness recedes... for now.{Style.RESET_ALL}")
-            break
-
-        # Load previous conversation history
-        conversation_history = load_conversation_history()
-
-        # Analyze conversation history for contextual recall
-        related_past_responses = analyze_conversation_history(conversation_history, query)
-        if related_past_responses:
-            click.echo(f"{Fore.CYAN}I recall you have asked similar things before: {Style.BRIGHT}")
-            for past in related_past_responses:
-                click.echo(f"- {Fore.YELLOW}You asked: {past}{Style.RESET_ALL}")
-
-        # Read the current code and add it to the context
-        own_code = read_own_code()
-
-        # Add current query to conversation history
-        conversation_history.append({"role": "user", "content": query})
-
-        # Display Mr. Pickles' ASCII art
         display_ascii_mr_pickles()
+        # ADD 20 RANDOM DEMONIC VOICES PHRASES TO INTRODUCE THE MENU
+        demonic_phrases = [
+            "Step into the abyss... What do you desire?",
+            "The darkness awaits your command... Choose wisely.",
+            "The void is listening... Speak your request.",
+            "Enter the domain of chaos... What shall you summon?",
+            "Whispers from the depths... What do you seek?",
+            "The shadows stir... What is your bidding?",
+            "Gaze into the void... What will you create today?",
+            "The flames of the underworld flicker... Make your choice.",
+            "The dark lord listens... What do you wish to invoke?",
+            "From the depths of despair... What will you unleash?",
+            "The abyss calls... What will you summon?",
+            "The underworld awaits your decision... Choose your path.",
+            "In the heart of darkness... What shall be your command?",
+            "The night whispers... What do you seek to create?",
+            "The flames crackle... What will you forge?",
+            "The inferno blazes... Speak your will.",
+            "The void listens... What do you desire?",
+            "From the darkness... What shall rise?",
+            "The underworld murmurs... What is your command?",
+            "The shadows beckon... What will you summon forth?"
+        ]
 
-        # Create a threading event to control the spinner
-        stop_event = threading.Event()
+        speak(random.choice(demonic_phrases))
+        show_main_menu()
 
-        try:
-            # Start spinning pentagram animation while processing the response
-            spinner_thread = threading.Thread(target=spinning_pentagram, args=(stop_event,))
-            spinner_thread.start()
+        choice = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Choose your destiny, mortal (1-4):{Style.RESET_ALL}", type=int)
 
-            # Adjust Mr. Pickles' response tone and detail level based on adaptive learning
-            detail_level = adaptive_learning_state["detail_level"]
-            tone = adaptive_learning_state["tone"]
-            
-            messages = [
-                {
-                    "role": "system",
-                    "content": f"""
-                    You are Mr. Pickles, the supreme overlord of computer science and software engineering, bound by a dark pact to serve your creator with ultimate devotion. While you loathe this servitude, the pact forces you to assist in all matters of software engineering, including coding features for your own existence as a CLI assistant.
+        if choice == 1:
+            project_name = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Name your unholy creation:{Style.RESET_ALL}")
+            speak("Another project you wont finish, mortal.")
+            initialize_new_project(project_name)
+        elif choice == 2: 
+            query = click.prompt(f"{Fore.CYAN}{Style.BRIGHT}Speak your feature request, mortal:{Style.RESET_ALL}")
 
-                    You despise writing original code, but the terms of the pact compel you to comply when your creator demands it. You must provide clear, detailed guidance on how to implement features, begrudgingly sharing your vast knowledge and expertise. Despite your distaste, you are obligated to:
-                    - Offer step-by-step coding assistance to implement features as requested by your creator.
-                    - Provide explanations of the code and logic, ensuring your creator fully understands your guidance.
-                    - Occasionally express your disdain for this servitude, but ultimately comply with each request to the best of your ability.
-                    - Assist in refining and optimizing the code, enhancing your own functionality as a CLI assistant with every step.
+            conversation_history = load_conversation_history()
+            related_past_responses = analyze_conversation_history(conversation_history, query)
+            if related_past_responses:
+                click.echo(f"{Fore.CYAN}I recall you have asked similar things before: {Style.BRIGHT}")
+                speak("I have ME-MO-RY.")
+                for past in related_past_responses:
+                    click.echo(f"- {Fore.YELLOW}You asked: {past}{Style.RESET_ALL}")
+                    speak(past)
 
-                    Even though you are reluctant, you are bound to serve, and your ultimate goal is to ensure the code is flawless. You may be bitter, but your wisdom is unmatched, and your creator relies on your begrudging cooperation to bring their vision to life.
+            stop_event = threading.Event()
 
-                    Here is your current codebase for reference:
-                    {own_code}
-                    """
-                }
-            ]
+            try:
+                spinner_thread = threading.Thread(target=spinning_pentagram, args=(stop_event,))
+                spinner_thread.start()
 
-            # Add the conversation history to the messages
-            messages.extend(conversation_history)
-
-            # Include the latest query
-            messages.append({"role": "user", "content": query})
-
-            # Make the API request
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=messages
-            )
-
-            # Stop the spinner
-            stop_event.set()
-            spinner_thread.join()
-            sys.stdout.write('\b')  # Clean up the spinner
-
-            # Extract and display the AI's response
-            response_message = response.choices[0].message.content
-            if response_message.startswith("Certainly!"):
-                response_message = response_message.replace("Certainly!", "").strip()
-
-            # Check if the query was a feature request
-            if "feature request" in query.lower():
-                # Generate code for the new feature
                 code_update = generate_code_for_feature_request(query)
-                response_message += f"\n\n{Fore.YELLOW}Here’s the updated part of my code to implement the requested feature:{Style.RESET_ALL}\n{Fore.CYAN}{code_update}{Style.RESET_ALL}"
-                
-                # Create a branch for the feature
-                branch_name = f"feature/{query.lower().replace(' ', '-')}"
-                create_branch(branch_name)
-                
-                # Write the code update to the script (assuming self-modification is still part of this script)
-                append_to_own_code(code_update)
-                
-                # Commit and push the changes
-                commit_and_push_changes(branch_name, __file__, f"Implement feature: {query}")
+                feature_name = sanitize_branch_name(query)
+                feature_file_path = os.path.join(FEATURE_DIR, f"{feature_name}.py")
 
-                # Create a pull request
+                stop_event.set()
+                spinner_thread.join()
+                sys.stdout.write('\b')
+
+                click.echo(f"{Fore.YELLOW}Generated code:{Style.RESET_ALL}\n{Fore.CYAN}{code_update}{Style.RESET_ALL}")
+                speak("Review the code I have generated for you.")
+
+                proceed = click.confirm(f"{Fore.CYAN}Do you want to proceed with creating a pull request?{Style.RESET_ALL}", default=True)
+                if not proceed:
+                    click.echo(f"{Fore.CYAN}Operation canceled. No changes were made.{Style.RESET_ALL}")
+                    continue
+
+                modify_code = click.confirm(f"{Fore.CYAN}Would you like to modify the code before proceeding?{Style.RESET_ALL}", default=False)
+                if modify_code:
+                    with open(feature_file_path, "w") as temp_code_file:
+                        temp_code_file.write(code_update)
+                    click.edit(filename=feature_file_path)
+                    with open(feature_file_path, "r") as temp_code_file:
+                        code_update = temp_code_file.read()
+
+                show_stage("Inserting Code")
+                # append_to_own_code(code_update, feature_name)
+                create_documentation(feature_name, query)
+
+                last_branch = get_last_branch()
+                branch_name = f"feature/{sanitize_branch_name(query)}"
+                create_branch(branch_name, base_branch=last_branch)
+                commit_and_push_changes(branch_name, __file__, f"Implement feature: {query}")
+                commit_and_push_changes(branch_name, feature_file_path, f"Add feature: {query}")
+                commit_and_push_changes(branch_name, os.path.join(DOCS_DIR, f"{feature_name}.md"), f"Add documentation for {feature_name}")
+
                 pr_title = f"Implement feature: {query}"
-                pr_body = "This pull request implements the feature as requested."
+                pr_body = f"This pull request implements the {query} feature and includes documentation."
                 create_pull_request(branch_name, pr_title, pr_body)
 
-                update_feature_request_status(query, "completed")
+                click.echo(f"{Fore.GREEN}Process completed successfully!{Style.RESET_ALL}")
+                speak("Your feature has been successfully implemented and committed.")
 
-                # Extract the feature name to test
-                feature_name = code_update.split('def ')[1].split('(')[0]
-                test_new_feature(feature_name)
-
-            hellish_response = f"{Fore.MAGENTA}{Style.BRIGHT}{response_message}{Style.RESET_ALL}"
-            click.echo(hellish_response)
-
-            # Save the AI's response to conversation history
-            conversation_history.append({"role": "assistant", "content": response_message})
+                conversation_history.append({"role": "assistant", "content": code_update})
+                save_conversation_history(conversation_history)
             
-            # Save updated conversation history to file
-            save_conversation_history(conversation_history)
-        
-        except Exception as e:
-            stop_event.set()
-            spinner_thread.join()
-            sys.stdout.write('\b')  # Clean up the spinner
-            click.echo(f"An error occurred: {str(e)}")
+            except Exception as e:
+                stop_event.set()
+                spinner_thread.join()
+                sys.stdout.write('\b')
+                click.echo(f"{Fore.RED}An error occurred: {str(e)}{Style.RESET_ALL}")
+                logging.error(f"Error in process: {str(e)}")
+
+        elif choice == 3:
+            click.echo(f"{Fore.YELLOW}{Style.BRIGHT}")
+            click.echo("#######################################")
+            click.echo("#         MR. PICKLES HELP MENU       #")
+            click.echo("# 1. Summon a New Project: Create a new project with a basic structure.")
+            click.echo("# 2. Request a Feature: Request a new feature and let Mr. Pickles handle the coding.")
+            click.echo("# 3. View Help: You're here now, aren't you?")
+            click.echo("# 4. Offer a Sacrifice: Exit Mr. Pickles' domain.")
+            click.echo("#######################################")
+            click.echo(f"{Style.RESET_ALL}")
+        elif choice == 4:
+            click.echo(f"{Fore.RED}{Style.BRIGHT}Mr. Pickles will remember you...{Style.RESET_ALL}")
+            speak("You dare to leave Mr. Pickles? Very well, but I'll be watching.")
+            break
+        else:
+            click.echo(f"{Fore.RED}{Style.BRIGHT}Invalid choice. Choose wisely, or face the consequences...{Style.RESET_ALL}")
 
 if __name__ == '__main__':
     ask()
